@@ -39,6 +39,7 @@ Pods/
 !.env.example
 *.pem
 *.key
+backend/keys/
 
 # Docker
 docker-compose.override.yml

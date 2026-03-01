@@ -1,0 +1,31 @@
+version: "3.8"
+
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - PAT_DOCKER_BACKEND=docker
+      - PAT_DEV_TOKEN=dev-token-change-me
+      - PAT_CONTAINER_RUNTIME=runsc
+      - PAT_CONTAINER_NETWORK=pat-restricted
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./keys:/app/keys
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
+    restart: unless-stopped
+    depends_on:
+      - runtime-build
+
+  runtime-build:
+    image: pat-runtime:latest
+    build:
+      context: ./docker
+      dockerfile: Dockerfile.runtime
+    entrypoint: ["echo", "Runtime image built"]
+
+networks:
+  pat-restricted:
+    driver: bridge
+    # Egress rules applied via iptables — see docs/SECURITY.md
