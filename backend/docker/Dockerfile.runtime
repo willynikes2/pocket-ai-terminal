@@ -1,0 +1,46 @@
+FROM debian:bookworm-slim
+
+# Security: create non-root user
+RUN groupadd -g 1000 pat && useradd -u 1000 -g pat -m -s /bin/bash pat
+
+# Install system deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash tmux git curl ca-certificates openssh-client \
+    python3 python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Node.js 20 LTS
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Claude Code globally
+RUN npm install -g @anthropic-ai/claude-code
+
+# Create workspace
+RUN mkdir -p /workspace/uploads && chown -R pat:pat /workspace
+
+# Create secrets mount point
+RUN mkdir -p /run/secrets && chown pat:pat /run/secrets
+
+# Copy shell integration hooks
+COPY shell-integration.bash /etc/profile.d/pat-shell-integration.sh
+
+# Copy PAT helper script
+COPY pat.sh /usr/local/bin/pat
+RUN chmod +x /usr/local/bin/pat
+
+# Inject OSC 133 hooks into global bashrc (runs in non-login shells too)
+RUN cat /etc/profile.d/pat-shell-integration.sh >> /etc/bash.bashrc
+
+# Container .bashrc sources secrets from tmpfs
+RUN echo 'export ANTHROPIC_API_KEY=$(cat /run/secrets/ANTHROPIC_API_KEY 2>/dev/null)' >> /home/pat/.bashrc \
+    && echo 'export OPENAI_API_KEY=$(cat /run/secrets/OPENAI_API_KEY 2>/dev/null)' >> /home/pat/.bashrc
+
+# Copy entrypoint
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+USER pat
+WORKDIR /workspace
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

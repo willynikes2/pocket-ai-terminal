@@ -886,6 +886,7 @@ pocket-ai-terminal/
 │   │   ├── models.py                # Pydantic models
 │   │   ├── security.py              # Key injection, rate limiting
 │   │   ├── notifications.py         # APNs push notifications
+│   │   ├── sms.py                   # SMS Mode: webhook, TOTP, exec, chunking
 │   │   └── config.py                # Environment config
 │   ├── docker/
 │   │   ├── Dockerfile.runtime       # Container image
@@ -906,6 +907,7 @@ pocket-ai-terminal/
 │   │   │   ├── ThreadTerminalView.swift       # SwiftUI blocks (LazyVStack)
 │   │   │   ├── TerminalModeView.swift         # SwiftTerm wrapper
 │   │   │   ├── SettingsView.swift
+│   │   │   ├── SMSSettingsView.swift          # SMS Mode config + audit log
 │   │   │   └── Components/
 │   │   │       ├── CommandBlockView.swift      # Single command+output block
 │   │   │       ├── ErrorBlockView.swift        # Error block with actions
@@ -1209,6 +1211,7 @@ iOS: UNUserNotificationCenter categories, actionable notifications, notification
 - CRIU checkpoint/restore for instant session resume
 - Context-aware command predictions (Tier 2 — project type, git state, recent output)
 - AI-powered command predictions (Tier 3 — lightweight model for next-command suggestion)
+- **SMS Mode — "Text your terminal"** (see Section 23)
 - Multiple AI providers (OpenAI, Google, local)
 - iPad split-view with Thread Mode + file browser
 - Team workspaces
@@ -1907,5 +1910,254 @@ class TerminalStream: ObservableObject {
 - App Transport Security: default (enforces TLS 1.3)
 - Background execution: register for `UIBackgroundTaskIdentifier` to maintain WS during brief backgrounds
 - Push notification: notify when long-running command completes (future)
+
+---
+
+---
+
+## 23) SMS Mode — "Text Your Terminal" (Phase 2)
+
+> Position as: "Emergency ops" / "Remote admin by text" / "When you don't have your laptop"
+> This is NOT a full interactive PTY. It is a **threaded remote exec** channel that maps directly to Thread Mode's message block model.
+
+### 23.1 Problem / Value
+
+Users need access when:
+- No laptop available
+- No app access (phone damaged, borrowed phone)
+- Bad network (travel, outages — SMS still works)
+- Quick status check isn't worth opening the app
+
+SMS Mode enables: quick status checks, log tailing, service restarts (if permitted), "run script and summarize," and emergency operations with strong 2FA + timeouts.
+
+### 23.2 Non-goals
+
+- No full-screen interactive apps (vim, nano, less, top)
+- No streaming PTY
+- No unbounded output
+- No unauthenticated access by phone number alone
+- No public "anonymous" terminal numbers (must be tied to an account)
+
+### 23.3 Architecture
+
+```
+User Phone                Twilio/Telnyx              FastAPI Backend
+    │                          │                          │
+    │──── SMS ────────────────►│                          │
+    │                          │──── POST /sms/webhook ──►│
+    │                          │                          │──► Auth (TOTP)
+    │                          │                          │──► Route to session
+    │                          │                          │──► docker exec (non-interactive)
+    │                          │                          │──► Capture stdout/stderr/exit
+    │                          │◄──── Send SMS response ──│
+    │◄──── SMS (1/N chunks) ───│                          │
+```
+
+Components:
+- **SMS Provider**: Twilio (primary) or Telnyx (fallback)
+- **Webhook Service**: `POST /sms/webhook` — receives inbound SMS
+- **Auth & Session Router**: maps phone number → user → session
+- **Command Executor**: `docker exec` (non-interactive, no PTY) with strict limits
+- **Outbound Sender**: chunked SMS responses with headers
+
+### 23.4 Security Model
+
+**Threats:** SIM swap/number takeover, SMS interception, replay attacks, command spam, unauthorized execution.
+
+**Phone number alone is NOT sufficient authentication. Always require TOTP.**
+
+**Message Format:**
+```
+<6-digit-TOTP> <command>
+<6-digit-TOTP> @<session-label> <command>
+```
+
+Examples:
+```
+482193 uptime
+482193 @prod tail -n 40 logs/api.log
+```
+
+**Control Window:**
+Once a valid TOTP is received, open a 10-minute control window for that phone/user pair. Within the window:
+- "Safe read-only" commands: no TOTP required (configurable)
+- "Dangerous commands": always require TOTP
+- Configurable: require TOTP for every command (paranoid mode)
+
+**Lockout:** 5 failed TOTP attempts → lock SMS for 30 minutes (require app re-auth to unlock)
+
+**Replay Protection:** Maintain sliding window of last N TOTPs used per user, reject duplicates within window.
+
+### 23.5 Permission Profiles (Command Policies)
+
+**Read-only (default):**
+`uptime`, `whoami`, `pwd`, `ls` (restricted paths), `df -h`, `free -m`, `docker ps`, `tail -n <N> <file>` (restricted paths), `git status`
+
+**Ops:** Adds `systemctl status/restart <allowlisted-svc>`, `docker restart <allowlisted-container>`, `pm2 restart <allowlisted-name>`, `git pull` (restricted repos)
+
+**Admin (off by default):** Broader shell access, but still enforces max runtime, output limits, denylist, and requires TOTP on every command.
+
+**Denylist (always blocked) — regex patterns:**
+`rm -rf /`, `mkfs`, `dd if=`, `shutdown`, `reboot`, `:(){ :|:& };:`, `curl | sh`, `wget | sh`, `nc`/`netcat`/`socat`, crypto mining keywords
+
+### 23.6 Command Execution Model
+
+**Non-interactive exec (no PTY):**
+```python
+result = container.exec_run(
+    f'bash -lc "{sanitized_command}"',
+    workdir="/workspace",
+    user="1000:1000",
+    demux=True  # separate stdout/stderr
+)
+stdout, stderr = result.output
+exit_code = result.exit_code
+```
+
+**Resource Limits per SMS command:**
+| Profile | Max Runtime | Max Output |
+|---------|------------|------------|
+| Read-only | 10 seconds | 8 KB |
+| Ops | 30 seconds | 8 KB |
+| Admin | 30 seconds | 16 KB |
+
+Kill process if over limit.
+
+### 23.7 Output Formatting & Chunking
+
+SMS character limit: ~160 chars per segment (1600 per MMS, but stick to SMS for reliability).
+
+**Response header (every first chunk):**
+```
+[PAT][prod][exit:0] uptime
+ 14:23:01 up 3 days, 2:15, 0 users
+```
+
+**Chunked output:** `Message 1/N`, `Message 2/N`, etc.
+
+**Truncation:** If output exceeds limit, final chunk includes:
+```
+…truncated. Reply: "more" or "tail 100 <file>"
+```
+
+**Done response (no output, exit=0):**
+```
+✓ Done (exit 0)
+```
+
+**Error response (exit != 0):**
+```
+[PAT][prod][exit:127] foo
+bash: foo: command not found
+Reply "logs" to view last 50 lines
+```
+
+### 23.8 Session Routing
+
+**Default session:** If no `@session` specified, route to user's most recently active session.
+
+**Named session:** `@prod`, `@dev`, etc. (session labels set in app).
+
+**Sleeping session:** Auto-resume if user has permission, reply "Resuming session…" then execute. If resume fails, reply with error.
+
+### 23.9 Number Provisioning
+
+**Shared number (default, cheaper):** One inbound Twilio number. Route by `From` phone number → user mapping.
+
+**Dedicated number (premium add-on):** Per-user inbound number. Better mental model, better deliverability, higher cost.
+
+### 23.10 API Endpoints
+
+```python
+# Webhook (Twilio calls this)
+POST /sms/webhook
+  → Twilio payload: { From, To, Body, MessageSid }
+  ← TwiML response or empty 200
+
+# User settings
+GET  /sms/settings           → { enabled, profile, window_minutes, phone_number }
+POST /sms/settings           → { profile: "readonly"|"ops"|"admin", window_minutes: 10 }
+POST /sms/enable             → { phone_number: "+1..." }  # provisions mapping
+POST /sms/disable            → {}
+GET  /sms/audit              → [{ timestamp, command, exit_code, session, ... }]
+```
+
+### 23.11 Audit Logging (Required)
+
+Log every inbound SMS:
+```json
+{
+    "timestamp": "ISO 8601",
+    "user_id": "uuid",
+    "from_number_hash": "sha256(+1...)",
+    "session_id": "uuid",
+    "command": "uptime",
+    "exit_code": 0,
+    "duration_ms": 45,
+    "bytes_out": 128,
+    "allowed": true,
+    "blocked_reason": null
+}
+```
+
+Phone numbers stored as SHA-256 hashes in audit logs (privacy).
+
+### 23.12 iOS App Integration (Settings)
+
+```
+Settings > SMS Mode
+├── Enable SMS access         [OFF] ← warning dialog on enable
+├── Permission profile        [Read-only ▼]
+├── Control window            [10 minutes ▼]
+├── Require TOTP every cmd    [OFF]
+├── Setup TOTP
+│   └── Show QR code for authenticator app
+├── Linked phone number       +1 (555) ***-**89
+└── SMS Activity              → audit log list
+```
+
+### 23.13 Thread Mode Integration
+
+SMS commands should appear in Thread Mode history when the user opens the app:
+
+```json
+{
+    "id": "uuid",
+    "type": "user",
+    "category": "system",
+    "command": "uptime",
+    "content": " 14:23:01 up 3 days...",
+    "exit_code": 0,
+    "timestamp": "2025-01-15T14:23:01Z",
+    "source": "sms"
+}
+```
+
+The `source: "sms"` field lets Thread Mode render these with a 📱 icon to distinguish from in-app commands. The conversation stays chronological — SMS commands slot into the timeline alongside app commands.
+
+### 23.14 SMS Mode Milestones
+
+| Milestone | Description |
+|-----------|-------------|
+| SM1 | Twilio webhook receiving + outbound replies (hello world) |
+| SM2 | TOTP verification + control window + lockout |
+| SM3 | Session routing + auto-resume |
+| SM4 | Command allowlist/denylist + exec timeouts |
+| SM5 | Output chunking + truncation |
+| SM6 | Audit logging + admin controls |
+| SM7 | Dedicated number add-on |
+
+### 23.15 SMS Mode Acceptance Tests
+
+- [ ] Unauthorized phone number → rejected
+- [ ] Wrong TOTP 5 times → lockout triggers
+- [ ] Valid TOTP → opens 10-minute window
+- [ ] Read-only profile blocks `rm -rf` and denylist commands
+- [ ] Command output chunks correctly with 1/N headers
+- [ ] Large output truncates and suggests `more`
+- [ ] Sleeping session auto-resumes and executes
+- [ ] Audit log records all events with hashed phone numbers
+- [ ] SMS command appears in Thread Mode with 📱 icon
+- [ ] Expired control window requires fresh TOTP
 
 ---

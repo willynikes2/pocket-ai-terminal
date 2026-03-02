@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     container_image: str = "pat-runtime:latest"
     container_runtime: str = "runsc"
     container_network: str = "pat-restricted"
+    seccomp_profile_path: str = "docker/seccomp-profile.json"
 
     # Pool
     pool_size: int = 5

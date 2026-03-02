@@ -92,7 +92,10 @@ class DockerContainerBackend(ContainerBackend):
                 runtime=settings.container_runtime,
                 cap_drop=["ALL"],
                 cap_add=["CHOWN", "SETUID", "SETGID"],
-                security_opt=["no-new-privileges"],
+                security_opt=[
+                    "no-new-privileges",
+                    f"seccomp={settings.seccomp_profile_path}",
+                ],
                 read_only=True,
                 tmpfs={
                     "/tmp": "noexec,nosuid,size=100m",
