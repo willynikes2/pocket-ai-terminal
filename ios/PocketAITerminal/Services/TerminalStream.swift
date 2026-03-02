@@ -40,8 +40,15 @@ final class TerminalStream {
     private var lastBaseURL: String?
     private var ticketProvider: (() async throws -> String)?
 
+    // Thread Mode parsers
+    private let osc133Parser = OSC133Parser()
+    private let blockStateMachine = BlockStateMachine()
+
     /// Terminal Mode consumes raw bytes through this callback.
     var onRawOutput: ((Data) -> Void)?
+
+    /// Thread Mode consumes parsed blocks through this callback.
+    var onBlocksChanged: (([ThreadBlock]) -> Void)?
 
     /// Session info updates.
     var onSessionInfo: (([String: Any]) -> Void)?
@@ -101,6 +108,14 @@ final class TerminalStream {
         }
     }
 
+    /// Submit a command from Thread Mode's InputBarView.
+    /// Records the command in the block state machine, then sends it as terminal input.
+    func submitCommand(_ command: String) {
+        blockStateMachine.userSubmittedCommand(command)
+        onBlocksChanged?(blockStateMachine.blocks)
+        sendInput(Data((command + "\n").utf8))
+    }
+
     func sendResize(cols: Int, rows: Int) {
         guard connectionState == .connected || connectionState == .authenticating else { return }
         let json = "{\"cols\":\(cols),\"rows\":\(rows)}"
@@ -123,6 +138,7 @@ final class TerminalStream {
         session?.invalidateAndCancel()
         session = nil
         connectionState = .disconnected
+        osc133Parser.reset()
     }
 
     // MARK: - Private
@@ -164,7 +180,13 @@ final class TerminalStream {
                 if connectionState == .authenticating {
                     connectionState = .connected
                 }
-                onRawOutput?(Data(payload))
+                let outputData = Data(payload)
+                // Terminal Mode: raw bytes
+                onRawOutput?(outputData)
+                // Thread Mode: parse OSC 133 → blocks
+                let events = osc133Parser.process(outputData)
+                blockStateMachine.process(events)
+                onBlocksChanged?(blockStateMachine.blocks)
 
             case WSMessageType.sessionInfo:
                 connectionState = .connected

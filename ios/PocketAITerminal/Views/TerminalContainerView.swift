@@ -10,9 +10,9 @@ struct TerminalContainerView: View {
     let appState: AppState
     let authManager: AuthManager
 
-    @State private var selectedMode: TerminalMode = .terminal
+    @State private var selectedMode: TerminalMode = .thread
     @State private var terminalStream = TerminalStream()
-    @State private var isConnected = false
+    @State private var blocks: [ThreadBlock] = []
 
     var body: some View {
         VStack(spacing: 0) {
@@ -29,7 +29,10 @@ struct TerminalContainerView: View {
             // Content
             switch selectedMode {
             case .thread:
-                threadPlaceholder
+                ThreadTerminalView(
+                    blocks: blocks,
+                    terminalStream: terminalStream
+                )
 
             case .terminal:
                 TerminalModeView(terminalStream: terminalStream)
@@ -51,17 +54,6 @@ struct TerminalContainerView: View {
         }
     }
 
-    // MARK: - Thread Mode Placeholder (M4)
-
-    private var threadPlaceholder: some View {
-        ContentUnavailableView(
-            "Thread Mode",
-            systemImage: "bubble.left.and.text.bubble.right",
-            description: Text("Coming in Milestone 4")
-        )
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
     // MARK: - Connection
 
     private var connectionIndicator: some View {
@@ -80,6 +72,11 @@ struct TerminalContainerView: View {
 
     private func connectToSession() {
         guard let ticket = session.wsTicket else { return }
+
+        // Wire block updates for Thread Mode
+        terminalStream.onBlocksChanged = { newBlocks in
+            self.blocks = newBlocks
+        }
 
         let apiClient = APIClient(authManager: authManager, baseURL: { appState.baseURL })
 
