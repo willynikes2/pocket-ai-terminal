@@ -116,6 +116,12 @@ final class TerminalStream {
         sendInput(Data((command + "\n").utf8))
     }
 
+    /// Add a system/meta block (e.g., upload notification).
+    func addMetaBlock(content: String) {
+        blockStateMachine.addMetaBlock(content: content)
+        onBlocksChanged?(blockStateMachine.blocks)
+    }
+
     func sendResize(cols: Int, rows: Int) {
         guard connectionState == .connected || connectionState == .authenticating else { return }
         let json = "{\"cols\":\(cols),\"rows\":\(rows)}"

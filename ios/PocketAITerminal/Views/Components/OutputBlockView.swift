@@ -90,6 +90,13 @@ struct OutputBlockView: View {
             } label: {
                 Label("Copy", systemImage: "doc.on.doc")
             }
+            ShareLink(
+                item: ANSIParser.stripANSI(block.content),
+                subject: Text("Terminal Output"),
+                message: Text("Output from Pocket AI Terminal")
+            ) {
+                Label("Save to File", systemImage: "square.and.arrow.up")
+            }
         }
     }
 

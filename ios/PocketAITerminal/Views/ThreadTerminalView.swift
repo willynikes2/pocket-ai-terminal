@@ -5,6 +5,7 @@ import SwiftUI
 struct ThreadTerminalView: View {
     let blocks: [ThreadBlock]
     let terminalStream: TerminalStream
+    let onUpload: () -> Void
     @State private var inputText = ""
 
     var body: some View {
@@ -30,9 +31,7 @@ struct ThreadTerminalView: View {
                 onSubmit: { command in
                     terminalStream.submitCommand(command)
                 },
-                onUpload: {
-                    // Upload handled in M6
-                },
+                onUpload: onUpload,
                 onKey: { data in
                     terminalStream.sendInput(data)
                 }
@@ -48,11 +47,19 @@ struct ThreadTerminalView: View {
             CommandBlockView(block: block)
 
         case .output:
-            OutputBlockView(block: block)
+            if block.category == .claude {
+                AIResponseBlockView(block: block)
+            } else {
+                OutputBlockView(block: block)
+            }
 
         case .error:
-            ErrorBlockView(block: block) { aiPrompt in
-                inputText = aiPrompt
+            if block.category == .claude {
+                AIResponseBlockView(block: block)
+            } else {
+                ErrorBlockView(block: block) { aiPrompt in
+                    inputText = aiPrompt
+                }
             }
 
         case .meta:

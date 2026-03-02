@@ -42,6 +42,61 @@ final class APIClient {
         let _: [String: String] = try await delete("/sessions/\(id)")
     }
 
+    // MARK: - Uploads
+
+    struct UploadedFile: Codable {
+        let name: String
+        let path: String
+        let size: Int
+    }
+
+    struct UploadResponse: Codable {
+        let uploaded: [UploadedFile]
+    }
+
+    func uploadFiles(
+        _ files: [(filename: String, data: Data)],
+        sessionId: String
+    ) async throws -> UploadResponse {
+        guard let url = URL(string: "\(baseURL())/sessions/\(sessionId)/upload") else {
+            throw APIError.invalidURL
+        }
+
+        let boundary = "PAT-\(UUID().uuidString)"
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue(
+            "multipart/form-data; boundary=\(boundary)",
+            forHTTPHeaderField: "Content-Type"
+        )
+        if let token = authManager.accessToken {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+
+        // Build multipart body
+        var body = Data()
+        for file in files {
+            body.append("--\(boundary)\r\n")
+            body.append("Content-Disposition: form-data; name=\"files\"; filename=\"\(file.filename)\"\r\n")
+            body.append("Content-Type: application/octet-stream\r\n\r\n")
+            body.append(file.data)
+            body.append("\r\n")
+        }
+        body.append("--\(boundary)--\r\n")
+
+        let (data, response) = try await URLSession.shared.upload(for: request, from: body)
+
+        guard let httpResponse = response as? HTTPURLResponse,
+              (200..<300).contains(httpResponse.statusCode) else {
+            let msg = String(data: data, encoding: .utf8) ?? "Upload failed"
+            throw APIError.serverError(
+                (response as? HTTPURLResponse)?.statusCode ?? 500, msg
+            )
+        }
+
+        return try JSONDecoder().decode(UploadResponse.self, from: data)
+    }
+
     // MARK: - HTTP Helpers
 
     private func get<T: Decodable>(_ path: String) async throws -> T {
@@ -128,6 +183,16 @@ final class APIClient {
             case .rateLimited: "Too many requests. Try again later."
             case .serverError(let code, let msg): "Server error (\(code)): \(msg)"
             }
+        }
+    }
+}
+
+// MARK: - Multipart Helper
+
+private extension Data {
+    mutating func append(_ string: String) {
+        if let data = string.data(using: .utf8) {
+            append(data)
         }
     }
 }
